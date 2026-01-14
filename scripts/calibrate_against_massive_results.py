@@ -130,6 +130,7 @@ def main() -> int:
     cfg = replace(
         cfg0,
         hub_mode=args.hub_mode,
+        region_coords_ft=None if cfg0.region_coords_ft is None else (cfg0.region_coords_ft * float(args.distance_scale)),
         region_distance_ft=cfg0.region_distance_ft * float(args.distance_scale),
     )
 

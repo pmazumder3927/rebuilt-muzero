@@ -37,6 +37,16 @@ class RobotSpec:
 
 @dataclass(frozen=True, slots=True)
 class GameConfig:
+    # Official field dimensions (feet). Used for rendering/layout defaults.
+    field_length_ft: float = 651.2 / 12.0
+    field_width_ft: float = 317.7 / 12.0
+
+    # Official zone/layout dimensions (feet). Used for default region coordinates and renderer overlays.
+    alliance_zone_depth_ft: float = 158.6 / 12.0
+    neutral_fuel_box_width_ft: float = 206.0 / 12.0
+    neutral_fuel_box_depth_ft: float = 72.0 / 12.0
+    hub_distance_from_alliance_wall_ft: float = 158.6 / 12.0
+
     # Time (seconds)
     auto_s: int = 20
     transition_s: int = 10
@@ -50,10 +60,10 @@ class GameConfig:
     n_neutral_bins: int = 8
     outpost_chute_capacity: int = 25
 
-    # Initial fuel (placeholders; tune to the official game once known)
+    # Initial fuel (official staging defaults with no preloads: 504 total fuel)
     initial_neutral_fuel_per_bin: int = 50
-    initial_depot_fuel: int = 52
-    initial_outpost_chute_fuel: int = 0
+    initial_depot_fuel: int = 24
+    initial_outpost_chute_fuel: int = 24
 
     # Scoring (placeholders; tune later)
     fuel_point_value: int = 1
@@ -74,6 +84,7 @@ class GameConfig:
 
     # Region distance matrix (feet). Shape: (n_regions, n_regions).
     # Regions are enumerated in `rebuilt_muzero.sim.state`.
+    region_coords_ft: np.ndarray | None = None
     region_distance_ft: np.ndarray | None = None
     drive_overhead_s: float = 1.0
 
@@ -101,21 +112,53 @@ def _default_region_coords(n_neutral_bins: int) -> np.ndarray:
     This is NOT official geometry; it's a consistent distance prior for the macro-sim.
     """
     # Regions:
-    # 0 red zone, 1 blue zone, 2.. neutral bins, then red outpost, blue outpost, red tower, blue tower
+    # 0 red "zone" (modeled at the red HUB), 1 blue "zone" (blue HUB),
+    # 2.. neutral bins, then red outpost, blue outpost, red tower, blue tower
     coords: list[tuple[float, float]] = []
-    coords.append((-27.0, 0.0))  # red zone
-    coords.append((27.0, 0.0))  # blue zone
 
-    # Neutral bins spread across the midfield.
+    # Use the official FIELD size as a consistent reference frame.
+    field_length_ft = 651.2 / 12.0
+    field_width_ft = 317.7 / 12.0
+    half_len = field_length_ft / 2.0
+    half_wid = field_width_ft / 2.0
+
+    # HUB centers are located 158.6in from the ALLIANCE WALL and centered between BUMPS.
+    hub_from_wall_ft = 158.6 / 12.0
+    x_red_hub = -half_len + hub_from_wall_ft
+    x_blue_hub = half_len - hub_from_wall_ft
+    coords.append((x_red_hub, 0.0))  # red HUB ("zone" proxy)
+    coords.append((x_blue_hub, 0.0))  # blue HUB ("zone" proxy)
+
+    # Neutral fuel staging is roughly within a central box (206in wide × 72in deep).
+    box_w_ft = 206.0 / 12.0
+    box_d_ft = 72.0 / 12.0
+    cols = int(np.ceil(float(n_neutral_bins) / 2.0))
+    if cols < 1:
+        cols = 1
+    x_positions = np.linspace(-box_d_ft / 2.0 + box_d_ft / (2.0 * cols), box_d_ft / 2.0 - box_d_ft / (2.0 * cols), cols)
+    y_top = box_w_ft / 2.0
+    y_bottom = -box_w_ft / 2.0
     for i in range(n_neutral_bins):
-        x = -5.0 + 10.0 * (i / max(1, n_neutral_bins - 1))
-        y = 9.0 if i % 2 == 0 else -9.0
+        col = i // 2
+        y = y_top if (i % 2 == 0) else y_bottom
+        x = float(x_positions[min(col, cols - 1)])
         coords.append((x, y))
 
-    coords.append((-27.0, -13.5))  # red outpost
-    coords.append((27.0, -13.5))  # blue outpost
-    coords.append((-27.0, 13.5))  # red tower
-    coords.append((27.0, 13.5))  # blue tower
+    # OUTPOST: one per alliance, located at the (south) end of each ALLIANCE WALL.
+    # Use OUTPOST AREA width (71in) as a proxy to place the marker.
+    outpost_w_ft = 71.0 / 12.0
+    y_outpost = -half_wid + outpost_w_ft / 2.0
+
+    # TOWER: integrated into ALLIANCE WALL between DRIVER STATION 2 and 3.
+    # Use the stated shelf width (69in) as a rough driver station width for layout placement.
+    ds_w_ft = 69.0 / 12.0
+    tower_w_ft = 49.25 / 12.0
+    y_tower = -half_wid + outpost_w_ft + 2.0 * ds_w_ft + tower_w_ft / 2.0
+
+    coords.append((-half_len, y_outpost))  # red outpost
+    coords.append((half_len, y_outpost))  # blue outpost
+    coords.append((-half_len, y_tower))  # red tower
+    coords.append((half_len, y_tower))  # blue tower
     return np.asarray(coords, dtype=np.float32)
 
 
@@ -182,9 +225,20 @@ def default_robot_specs() -> tuple[RobotSpec, ...]:
 def default_config(*, n_neutral_bins: int = 8) -> GameConfig:
     coords = _default_region_coords(n_neutral_bins)
     region_distance_ft = _coords_to_distance_ft(coords)
+
+    # Official staging with no preloaded robots: 24 in each DEPOT + 24 in each OUTPOST CHUTE, rest in NEUTRAL.
+    total_fuel = 504
+    depot_each = 24
+    chute_each = 24
+    neutral_total = total_fuel - 2 * depot_each - 2 * chute_each
+    neutral_per_bin = int(np.floor(float(neutral_total) / max(1, int(n_neutral_bins))))
     return GameConfig(
         n_neutral_bins=n_neutral_bins,
+        region_coords_ft=coords,
         region_distance_ft=region_distance_ft,
+        initial_neutral_fuel_per_bin=neutral_per_bin,
+        initial_depot_fuel=depot_each,
+        initial_outpost_chute_fuel=chute_each,
         hub_exit_bin_ids=(
             0,
             max(0, n_neutral_bins // 3),

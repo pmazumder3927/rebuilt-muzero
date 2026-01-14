@@ -1,33 +1,6 @@
-# Byte-compiled / optimized / DLL files
+.tmp/
 __pycache__/
-*.py[cod]
-*$py.class
-
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Testing / coverage
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Generated results
-massive_results.json
-
-# OS files
+*.pyc
 .DS_Store
-Thumbs.db
+assets/field.png
+assets/saved_layout.json
