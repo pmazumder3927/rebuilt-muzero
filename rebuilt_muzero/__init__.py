@@ -1,2 +1,1 @@
-__all__ = ["sim"]
-
+__all__ = ["muzero", "sim"]
