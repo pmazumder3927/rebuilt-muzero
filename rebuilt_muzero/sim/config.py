@@ -51,8 +51,8 @@ class GameConfig:
     outpost_chute_capacity: int = 25
 
     # Initial fuel (placeholders; tune to the official game once known)
-    initial_neutral_fuel_per_bin: int = 30
-    initial_depot_fuel: int = 60
+    initial_neutral_fuel_per_bin: int = 50
+    initial_depot_fuel: int = 52
     initial_outpost_chute_fuel: int = 0
 
     # Scoring (placeholders; tune later)
@@ -75,13 +75,13 @@ class GameConfig:
     # Region distance matrix (feet). Shape: (n_regions, n_regions).
     # Regions are enumerated in `rebuilt_muzero.sim.state`.
     region_distance_ft: np.ndarray | None = None
-    drive_overhead_s: float = 0.5
+    drive_overhead_s: float = 1.0
 
     # Human-player processing: move fuel from corral -> chute each second (optional).
     outpost_fill_fuel_per_s: int = 5
 
     # Macro action overheads (seconds)
-    collect_overhead_s: float = 0.4
+    collect_overhead_s: float = 0.6
     deliver_overhead_s: float = 0.6
 
     # Defense model (very coarse)
@@ -103,19 +103,19 @@ def _default_region_coords(n_neutral_bins: int) -> np.ndarray:
     # Regions:
     # 0 red zone, 1 blue zone, 2.. neutral bins, then red outpost, blue outpost, red tower, blue tower
     coords: list[tuple[float, float]] = []
-    coords.append((-22.0, 0.0))  # red zone
-    coords.append((22.0, 0.0))  # blue zone
+    coords.append((-27.0, 0.0))  # red zone
+    coords.append((27.0, 0.0))  # blue zone
 
     # Neutral bins spread across the midfield.
     for i in range(n_neutral_bins):
-        x = -8.0 + 16.0 * (i / max(1, n_neutral_bins - 1))
-        y = 6.0 if i % 2 == 0 else -6.0
+        x = -5.0 + 10.0 * (i / max(1, n_neutral_bins - 1))
+        y = 9.0 if i % 2 == 0 else -9.0
         coords.append((x, y))
 
-    coords.append((-24.0, -12.0))  # red outpost
-    coords.append((24.0, -12.0))  # blue outpost
-    coords.append((-24.0, 12.0))  # red tower
-    coords.append((24.0, 12.0))  # blue tower
+    coords.append((-27.0, -13.5))  # red outpost
+    coords.append((27.0, -13.5))  # blue outpost
+    coords.append((-27.0, 13.5))  # red tower
+    coords.append((27.0, 13.5))  # blue tower
     return np.asarray(coords, dtype=np.float32)
 
 
@@ -185,5 +185,11 @@ def default_config(*, n_neutral_bins: int = 8) -> GameConfig:
     return GameConfig(
         n_neutral_bins=n_neutral_bins,
         region_distance_ft=region_distance_ft,
+        hub_exit_bin_ids=(
+            0,
+            max(0, n_neutral_bins // 3),
+            max(0, (2 * n_neutral_bins) // 3),
+            max(0, n_neutral_bins - 1),
+        ),
         missed_shot_bin_id_by_alliance=(0, max(0, n_neutral_bins - 1)),
     )

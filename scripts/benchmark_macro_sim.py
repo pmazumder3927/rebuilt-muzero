@@ -32,6 +32,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--neutral-bins", type=int, default=8)
     parser.add_argument("--check-fuel", action="store_true")
+    parser.add_argument("--with-obs", action="store_true", help="Benchmark env.step() (slower) instead of env.step_fast().")
     args = parser.parse_args()
 
     cfg = default_config(n_neutral_bins=args.neutral_bins)
@@ -51,12 +52,17 @@ def main() -> int:
 
         while True:
             actions = rng.integers(0, n_actions, size=6, dtype=np.int32)
-            res = env.step(actions)
+            if args.with_obs:
+                terminated = env.step(actions).terminated
+            else:
+                _, terminated = env.step_fast(actions)
             steps += 1
             if args.check_fuel and total_fuel(env) != start_fuel:
                 raise AssertionError("Fuel conservation violated (include reserved fuel in the total).")
-            if res.terminated:
-                total = res.obs["score"] + res.obs["penalty_points"]
+            if terminated:
+                state = env.state
+                assert state is not None
+                total = state.score + state.penalty_points
                 score_diff += float(total[0] - total[1])
                 break
 

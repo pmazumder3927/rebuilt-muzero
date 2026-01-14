@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from rebuilt_muzero.sim.actions import ActionKind, decode_action
+from rebuilt_muzero.sim.actions import ActionKind, action_space_size, decode_action
 from rebuilt_muzero.sim.config import GameConfig, RobotSpec, default_config, default_robot_specs
 from rebuilt_muzero.sim.state import Alliance, Phase, SimState, n_regions
 from rebuilt_muzero.sim.state import (
@@ -67,12 +67,21 @@ class RebuiltMacroSim:
         if not np.isclose(sum(self.config.hub_exit_probs), 1.0):
             raise ValueError(f"hub_exit_probs must sum to 1.0, got {sum(self.config.hub_exit_probs):.6f}")
 
+        self.n_actions = action_space_size(n_neutral_bins=self.config.n_neutral_bins)
+        self._action_kind = np.empty(self.n_actions, dtype=np.int8)
+        self._action_arg = np.empty(self.n_actions, dtype=np.int16)
+        for action_id in range(self.n_actions):
+            decoded = decode_action(action_id, n_neutral_bins=self.config.n_neutral_bins)
+            self._action_kind[action_id] = int(decoded.kind)
+            self._action_arg[action_id] = int(decoded.arg)
+
+        self._match_end_t = int(self.config.total_match_s())
         self.state: SimState | None = None
 
     # ---- Clock / phase / hub schedule -------------------------------------------------
 
     def total_match_s(self) -> int:
-        return self.config.total_match_s()
+        return self._match_end_t
 
     def phase_at(self, t: int) -> Phase:
         cfg = self.config
@@ -93,27 +102,32 @@ class RebuiltMacroSim:
             raise RuntimeError("Call reset() first.")
         return self.total_match_s() - self.state.t
 
-    def active_hubs(self) -> np.ndarray:
+    def active_hubs_mask(self, t: int | None = None) -> int:
         if self.state is None:
             raise RuntimeError("Call reset() first.")
 
+        if t is None:
+            t = int(self.state.t)
+
         if self.config.hub_mode == "always_on":
-            return np.array([True, True], dtype=np.bool_)
+            return 0b11
         if self.config.hub_mode != "rebuilt":
             raise ValueError(f"Unknown hub_mode={self.config.hub_mode!r} (expected 'rebuilt' or 'always_on').")
 
-        phase = self.phase_at(self.state.t)
+        phase = self.phase_at(t)
         if phase != Phase.AUTO and self.state.first_shift_active_alliance < 0:
             self._resolve_first_shift_active_alliance()
 
         if phase in (Phase.AUTO, Phase.TRANSITION, Phase.ENDGAME):
-            return np.array([True, True], dtype=np.bool_)
+            return 0b11
 
         shift_idx = int(phase) - int(Phase.SHIFT1)  # 0..3
         active_alliance = int(self.state.first_shift_active_alliance) ^ (shift_idx & 1)
-        hubs = np.array([False, False], dtype=np.bool_)
-        hubs[active_alliance] = True
-        return hubs
+        return 1 << int(active_alliance)
+
+    def active_hubs(self) -> np.ndarray:
+        mask = self.active_hubs_mask()
+        return np.array([bool(mask & 0b01), bool(mask & 0b10)], dtype=np.bool_)
 
     def _resolve_first_shift_active_alliance(self) -> None:
         if self.state is None:
@@ -198,7 +212,20 @@ class RebuiltMacroSim:
             "robot_climbed_level": self.state.robot_climbed_level.copy(),
         }
 
-    # ---- Step (implemented in the next milestone) ------------------------------------
+    # ---- Step ------------------------------------------------------------------------
+
+    def step_fast(self, actions: np.ndarray) -> tuple[float, bool]:
+        """
+        Fast step that avoids observation construction/copies.
+
+        Returns `(reward, terminated)`.
+        """
+        if self.state is None:
+            raise RuntimeError("Call reset() first.")
+        if self.state.t >= self._match_end_t:
+            return 0.0, True
+        reward, terminated, _, _ = self._advance(actions, validate_actions=False)
+        return reward, terminated
 
     def step(self, actions: np.ndarray) -> StepResult:
         """
@@ -211,72 +238,103 @@ class RebuiltMacroSim:
         """
         if self.state is None:
             raise RuntimeError("Call reset() first.")
+        if self.state.t >= self._match_end_t:
+            return StepResult(obs=self.observe(), reward=0.0, terminated=True, info={"reason": "match_over"})
+
+        reward, terminated, delta_red, delta_blue = self._advance(actions, validate_actions=True)
+        obs = self.observe()
+        info = {
+            "phase": obs["phase"],
+            "active_hubs": obs["active_hubs"],
+            "delta_total": np.asarray([delta_red, delta_blue], dtype=np.int32),
+        }
+        return StepResult(obs=obs, reward=reward, terminated=terminated, info=info)
+
+    def _advance(self, actions: np.ndarray, *, validate_actions: bool) -> tuple[float, bool, int, int]:
+        if self.state is None:
+            raise RuntimeError("Call reset() first.")
 
         cfg = self.config
         state = self.state
 
         if actions.shape != (6,):
             raise ValueError(f"actions must have shape (6,), got {actions.shape}")
+        if validate_actions and (np.any(actions < 0) or np.any(actions >= self.n_actions)):
+            raise ValueError(
+                f"actions must be within [0, {self.n_actions}), got min={int(actions.min())} max={int(actions.max())}"
+            )
 
-        if state.t >= cfg.total_match_s():
-            return StepResult(obs=self.observe(), reward=0.0, terminated=True, info={"reason": "match_over"})
-
-        start_total = state.score + state.penalty_points
+        start_red = int(state.score[int(Alliance.RED)] + state.penalty_points[int(Alliance.RED)])
+        start_blue = int(state.score[int(Alliance.BLUE)] + state.penalty_points[int(Alliance.BLUE)])
 
         # 1) Apply any tasks that finished at or before the current time.
-        self._process_completions(now_t=state.t)
+        self._process_completions(now_t=int(state.t))
 
         # 2) Compute defense pressure (ongoing + newly requested defenders).
-        ongoing_defenders = np.zeros(2, dtype=np.int32)
+        ongoing_red = 0
+        ongoing_blue = 0
         for robot_id in range(6):
-            if state.robot_task_action_id[robot_id] < 0:
+            task_action_id = int(state.robot_task_action_id[robot_id])
+            if task_action_id < 0:
                 continue
-            decoded = decode_action(int(state.robot_task_action_id[robot_id]), n_neutral_bins=cfg.n_neutral_bins)
-            if decoded.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
-                if state.robot_busy_until[robot_id] > state.t:
-                    ongoing_defenders[self._robot_alliance(robot_id)] += 1
+            if int(state.robot_busy_until[robot_id]) <= int(state.t):
+                continue
+            kind = int(self._action_kind[task_action_id])
+            if kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR:
+                if self._robot_alliance(robot_id) == Alliance.RED:
+                    ongoing_red += 1
+                else:
+                    ongoing_blue += 1
 
-        new_defenders = np.zeros(2, dtype=np.int32)
+        new_red = 0
+        new_blue = 0
         for robot_id in range(6):
-            if state.t < state.robot_busy_until[robot_id]:
+            if int(state.t) < int(state.robot_busy_until[robot_id]):
                 continue
-            decoded = decode_action(int(actions[robot_id]), n_neutral_bins=cfg.n_neutral_bins)
-            if decoded.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
-                new_defenders[self._robot_alliance(robot_id)] += 1
+            action_id = int(actions[robot_id])
+            kind = int(self._action_kind[action_id])
+            if kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR:
+                if self._robot_alliance(robot_id) == Alliance.RED:
+                    new_red += 1
+                else:
+                    new_blue += 1
 
-        defense_pressure = ongoing_defenders + new_defenders
+        defense_red = ongoing_red + new_red
+        defense_blue = ongoing_blue + new_blue
 
         # 3) Schedule actions for idle robots.
         for robot_id in range(6):
-            if state.t < state.robot_busy_until[robot_id]:
+            if int(state.t) < int(state.robot_busy_until[robot_id]):
                 continue
-            self._schedule_action(robot_id=robot_id, action_id=int(actions[robot_id]), defense_pressure=defense_pressure)
+            action_id = int(actions[robot_id])
+            kind = int(self._action_kind[action_id])
+            arg = int(self._action_arg[action_id])
+            alliance = self._robot_alliance(robot_id)
+            opp_defenders = defense_blue if alliance == Alliance.RED else defense_red
+            self._schedule_action(robot_id=robot_id, action_id=action_id, kind=kind, arg=arg, opp_defenders=opp_defenders)
 
         # 4) Advance time.
-        state.t += cfg.decision_interval_s
-        if state.t > cfg.total_match_s():
-            state.t = cfg.total_match_s()
+        state.t = int(state.t) + int(cfg.decision_interval_s)
+        if int(state.t) > self._match_end_t:
+            state.t = self._match_end_t
 
         # Human-player logistics (very coarse).
         self._fill_outpost_chutes()
 
         # Resolve shift order as soon as AUTO ends (uses AUTO fuel scored).
-        if self.phase_at(state.t) != Phase.AUTO and state.first_shift_active_alliance < 0:
+        if self.phase_at(int(state.t)) != Phase.AUTO and state.first_shift_active_alliance < 0:
             self._resolve_first_shift_active_alliance()
 
         # 5) Apply task completions that land exactly on this boundary.
-        self._process_completions(now_t=state.t)
+        self._process_completions(now_t=int(state.t))
 
-        end_total = state.score + state.penalty_points
-        reward = float((end_total[Alliance.RED] - end_total[Alliance.BLUE]) - (start_total[Alliance.RED] - start_total[Alliance.BLUE]))
-
-        terminated = state.t >= cfg.total_match_s()
-        info = {
-            "phase": int(self.phase_at(state.t)),
-            "active_hubs": self.active_hubs().astype(np.int8),
-            "delta_total": (end_total - start_total).copy(),
-        }
-        return StepResult(obs=self.observe(), reward=reward, terminated=terminated, info=info)
+        end_red = int(state.score[int(Alliance.RED)] + state.penalty_points[int(Alliance.RED)])
+        end_blue = int(state.score[int(Alliance.BLUE)] + state.penalty_points[int(Alliance.BLUE)])
+        delta_red = end_red - start_red
+        delta_blue = end_blue - start_blue
+        reward = float(delta_red - delta_blue)
+        terminated = int(state.t) >= self._match_end_t
+        return reward, terminated, delta_red, delta_blue
 
     # ---- Transition helpers -----------------------------------------------------------
 
@@ -284,17 +342,16 @@ class RebuiltMacroSim:
     def _robot_alliance(robot_id: int) -> int:
         return int(Alliance.RED) if robot_id < 3 else int(Alliance.BLUE)
 
-    def _schedule_action(self, *, robot_id: int, action_id: int, defense_pressure: np.ndarray) -> None:
+    def _schedule_action(self, *, robot_id: int, action_id: int, kind: int, arg: int, opp_defenders: int) -> None:
         cfg = self.config
         state = self.state
         assert state is not None
 
-        decoded = decode_action(action_id, n_neutral_bins=cfg.n_neutral_bins)
         alliance = self._robot_alliance(robot_id)
         opponent = int(Alliance.BLUE) if alliance == int(Alliance.RED) else int(Alliance.RED)
 
         # Pin timer tracking (very coarse).
-        if decoded.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
+        if kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR:
             state.robot_pin_time[robot_id] = np.int8(state.robot_pin_time[robot_id] + cfg.decision_interval_s)
             if int(state.robot_pin_time[robot_id]) > cfg.pin_limit_s:
                 state.penalty_points[opponent] += cfg.minor_foul_points
@@ -305,29 +362,29 @@ class RebuiltMacroSim:
 
         # Determine target region.
         target_region = from_region
-        if decoded.kind == ActionKind.COLLECT_NEUTRAL:
-            target_region = neutral_bin_region(decoded.arg)
-        elif decoded.kind == ActionKind.COLLECT_DEPOT:
+        if kind == ActionKind.COLLECT_NEUTRAL:
+            target_region = neutral_bin_region(arg)
+        elif kind == ActionKind.COLLECT_DEPOT:
             target_region = red_zone_region() if alliance == Alliance.RED else blue_zone_region()
-        elif decoded.kind == ActionKind.SCORE_HUB:
+        elif kind == ActionKind.SCORE_HUB:
             target_region = red_zone_region() if alliance == Alliance.RED else blue_zone_region()
-        elif decoded.kind == ActionKind.DELIVER_OUTPOST:
+        elif kind == ActionKind.DELIVER_OUTPOST:
             target_region = red_outpost_region(cfg.n_neutral_bins) if alliance == Alliance.RED else blue_outpost_region(cfg.n_neutral_bins)
-        elif decoded.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
+        elif kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR:
             target_region = blue_zone_region() if alliance == Alliance.RED else red_zone_region()
-        elif decoded.kind in (ActionKind.PREP_CLIMB, ActionKind.CLIMB):
+        elif kind == ActionKind.PREP_CLIMB or kind == ActionKind.CLIMB:
             target_region = red_tower_region(cfg.n_neutral_bins) if alliance == Alliance.RED else blue_tower_region(cfg.n_neutral_bins)
 
         # Reserve resources immediately to avoid oversubscription.
         reserved_fuel = 0
-        if decoded.kind == ActionKind.COLLECT_NEUTRAL:
+        if kind == ActionKind.COLLECT_NEUTRAL:
             capacity_left = int(self.robot_specs[robot_id].fuel_capacity) - int(state.robot_carried[robot_id])
             if capacity_left > 0:
-                available = int(state.neutral_fuel[decoded.arg])
+                available = int(state.neutral_fuel[arg])
                 reserved_fuel = min(capacity_left, available)
                 if reserved_fuel > 0:
-                    state.neutral_fuel[decoded.arg] -= reserved_fuel
-        elif decoded.kind == ActionKind.COLLECT_DEPOT:
+                    state.neutral_fuel[arg] -= reserved_fuel
+        elif kind == ActionKind.COLLECT_DEPOT:
             capacity_left = int(self.robot_specs[robot_id].fuel_capacity) - int(state.robot_carried[robot_id])
             if capacity_left > 0:
                 take_from_chute = min(capacity_left, int(state.outpost_chute[alliance]))
@@ -337,10 +394,10 @@ class RebuiltMacroSim:
                 take_from_depot = min(capacity_left, int(state.depot_fuel[alliance]))
                 state.depot_fuel[alliance] -= take_from_depot
                 reserved_fuel = take_from_chute + take_from_depot
-        elif decoded.kind == ActionKind.SCORE_HUB:
+        elif kind == ActionKind.SCORE_HUB:
             reserved_fuel = int(state.robot_carried[robot_id])
             state.robot_carried[robot_id] = 0
-        elif decoded.kind == ActionKind.DELIVER_OUTPOST:
+        elif kind == ActionKind.DELIVER_OUTPOST:
             reserved_fuel = int(state.robot_carried[robot_id])
             state.robot_carried[robot_id] = 0
 
@@ -348,9 +405,9 @@ class RebuiltMacroSim:
             from_region=from_region,
             to_region=target_region,
             robot_id=robot_id,
-            opp_defenders=int(defense_pressure[opponent]),
+            opp_defenders=opp_defenders,
         )
-        op_s = self._operation_time_s(robot_id=robot_id, decoded=decoded, reserved_fuel=reserved_fuel)
+        op_s = self._operation_time_s(robot_id=robot_id, kind=kind, arg=arg, reserved_fuel=reserved_fuel)
         duration_s = int(travel_s + op_s)
         if duration_s < 1:
             duration_s = 1
@@ -389,17 +446,17 @@ class RebuiltMacroSim:
 
         return int(np.ceil(t))
 
-    def _operation_time_s(self, *, robot_id: int, decoded: Any, reserved_fuel: int) -> int:
+    def _operation_time_s(self, *, robot_id: int, kind: int, arg: int, reserved_fuel: int) -> int:
         cfg = self.config
         spec = self.robot_specs[robot_id]
 
-        if decoded.kind == ActionKind.COLLECT_NEUTRAL or decoded.kind == ActionKind.COLLECT_DEPOT:
+        if kind == ActionKind.COLLECT_NEUTRAL or kind == ActionKind.COLLECT_DEPOT:
             if reserved_fuel <= 0:
                 return int(np.ceil(float(cfg.collect_overhead_s)))
             t = float(cfg.collect_overhead_s) + (float(reserved_fuel) / max(0.1, float(spec.intake_fuel_per_s)))
             return int(np.ceil(t))
 
-        if decoded.kind == ActionKind.SCORE_HUB:
+        if kind == ActionKind.SCORE_HUB:
             if reserved_fuel <= 0:
                 overhead = (0.0 if spec.shoot_on_move else float(spec.align_time_s)) + (
                     0.0 if spec.shoot_while_intake else float(spec.dump_time_s)
@@ -411,20 +468,20 @@ class RebuiltMacroSim:
             t = overhead + (float(reserved_fuel) / max(0.1, float(spec.shoot_fuel_per_s)))
             return int(np.ceil(t))
 
-        if decoded.kind == ActionKind.DELIVER_OUTPOST:
+        if kind == ActionKind.DELIVER_OUTPOST:
             return int(np.ceil(float(cfg.deliver_overhead_s)))
 
-        if decoded.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
+        if kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR:
             return cfg.defend_duration_s
 
-        if decoded.kind == ActionKind.IDLE:
+        if kind == ActionKind.IDLE:
             return 1
 
-        if decoded.kind == ActionKind.PREP_CLIMB:
+        if kind == ActionKind.PREP_CLIMB:
             return 1
 
-        if decoded.kind == ActionKind.CLIMB:
-            level = int(decoded.arg)
+        if kind == ActionKind.CLIMB:
+            level = int(arg)
             level = min(level, int(spec.max_climb_level))
             return int(spec.climb_time_s_by_level.get(level, 20))
 
@@ -456,7 +513,8 @@ class RebuiltMacroSim:
                 continue
 
             action_id = int(state.robot_task_action_id[robot_id])
-            decoded = decode_action(action_id, n_neutral_bins=cfg.n_neutral_bins)
+            kind = int(self._action_kind[action_id])
+            arg = int(self._action_arg[action_id])
             alliance = self._robot_alliance(robot_id)
             opponent = int(Alliance.BLUE) if alliance == int(Alliance.RED) else int(Alliance.RED)
 
@@ -465,13 +523,13 @@ class RebuiltMacroSim:
 
             reserved_fuel = int(state.robot_task_reserved_fuel[robot_id])
 
-            if decoded.kind in (ActionKind.COLLECT_NEUTRAL, ActionKind.COLLECT_DEPOT):
+            if kind == ActionKind.COLLECT_NEUTRAL or kind == ActionKind.COLLECT_DEPOT:
                 state.robot_carried[robot_id] = np.int16(int(state.robot_carried[robot_id]) + reserved_fuel)
 
-            elif decoded.kind == ActionKind.DELIVER_OUTPOST:
+            elif kind == ActionKind.DELIVER_OUTPOST:
                 state.outpost_corral[alliance] += reserved_fuel
 
-            elif decoded.kind == ActionKind.SCORE_HUB:
+            elif kind == ActionKind.SCORE_HUB:
                 # Legality: must be in alliance zone to score. If not, major foul and no points.
                 legal = is_in_alliance_zone(int(state.robot_region[robot_id]), alliance, cfg.n_neutral_bins)
 
@@ -483,10 +541,12 @@ class RebuiltMacroSim:
                         continue
                     if state.robot_task_action_id[r2] < 0:
                         continue
-                    d2 = decode_action(int(state.robot_task_action_id[r2]), n_neutral_bins=cfg.n_neutral_bins)
-                    if d2.kind in (ActionKind.DEFEND_OPPONENT_HUB_LANE, ActionKind.DEFEND_OPPONENT_COLLECTOR):
-                        if int(state.robot_busy_until[r2]) > now_t:
-                            opp_defenders += 1
+                    if int(state.robot_busy_until[r2]) <= now_t:
+                        continue
+                    task_action_id2 = int(state.robot_task_action_id[r2])
+                    kind2 = int(self._action_kind[task_action_id2])
+                    if kind2 == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind2 == ActionKind.DEFEND_OPPONENT_COLLECTOR:
+                        opp_defenders += 1
 
                 accuracy = float(self.robot_specs[robot_id].shoot_accuracy)
                 if opp_defenders > 0:
@@ -496,8 +556,7 @@ class RebuiltMacroSim:
                 misses = reserved_fuel - successes
 
                 # Fuel always gets redistributed physically; points only if legal + hub active.
-                hubs = self.active_hubs()
-                hub_active = bool(hubs[alliance])
+                hub_active = bool(self.active_hubs_mask(now_t) & (1 << int(alliance)))
                 if legal and hub_active:
                     state.score[alliance] += successes * cfg.fuel_point_value
                     if self.phase_at(now_t) == Phase.AUTO:
@@ -516,11 +575,11 @@ class RebuiltMacroSim:
                     miss_bin = cfg.missed_shot_bin_id_by_alliance[alliance]
                     state.neutral_fuel[miss_bin] += misses
 
-            elif decoded.kind == ActionKind.CLIMB:
+            elif kind == ActionKind.CLIMB:
                 if state.robot_climbed_level[robot_id] > 0:
                     pass
                 else:
-                    level = int(decoded.arg)
+                    level = int(arg)
                     level = min(level, int(self.robot_specs[robot_id].max_climb_level))
                     level = max(1, level)
                     state.robot_climbed_level[robot_id] = np.int8(level)
@@ -532,9 +591,8 @@ class RebuiltMacroSim:
                     state.score[alliance] += int(points)
 
             # Endgame tower protection foul (very coarse): defending while an opponent is on their tower.
-            if self.phase_at(now_t) == Phase.ENDGAME and decoded.kind in (
-                ActionKind.DEFEND_OPPONENT_HUB_LANE,
-                ActionKind.DEFEND_OPPONENT_COLLECTOR,
+            if self.phase_at(now_t) == Phase.ENDGAME and (
+                kind == ActionKind.DEFEND_OPPONENT_HUB_LANE or kind == ActionKind.DEFEND_OPPONENT_COLLECTOR
             ):
                 opp_tower = red_tower_region(cfg.n_neutral_bins) if opponent == Alliance.RED else blue_tower_region(cfg.n_neutral_bins)
                 opp_on_tower = bool(np.any(state.robot_region[(0 if opponent == Alliance.RED else 3) : (3 if opponent == Alliance.RED else 6)] == opp_tower))

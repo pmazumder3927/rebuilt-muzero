@@ -100,8 +100,8 @@ def run_match(env: RebuiltMacroSim, *, seed: int, blue_robot_id: int = 3, red_ro
         actions = np.full(6, idle_action_id, dtype=np.int32)
         actions[red_robot_id] = greedy_fuel_policy(env, red_robot_id, idle_action_id=idle_action_id)
         actions[blue_robot_id] = greedy_fuel_policy(env, blue_robot_id, idle_action_id=idle_action_id)
-        res = env.step(actions)
-        if res.terminated:
+        _, terminated = env.step_fast(actions)
+        if terminated:
             break
 
     state = env.state
@@ -182,4 +182,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

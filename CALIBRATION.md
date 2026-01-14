@@ -46,3 +46,12 @@ The macro-simulator will be extended to:
 The goal is not to match every row exactly (this dataset has one sample per config and includes stochasticity),
 but to set *reasonable default scalings* and ensure the sim’s throughput sensitivity matches reality trends.
 
+### Calibration harness
+
+Run a rough “does the sim respond to robot parameters the right way?” check:
+
+`python3 scripts/calibrate_against_massive_results.py --samples 200 --episodes-per-sample 3 --hub-mode rebuilt`
+
+You can also tune the effective travel scale used for the comparison:
+
+`python3 scripts/calibrate_against_massive_results.py --distance-scale 2.0`
