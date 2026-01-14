@@ -79,19 +79,17 @@ def run_mcts(
     net.eval()
     obs_t = torch.from_numpy(obs).to(device=device, dtype=torch.float32)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         root_out = net.initial_inference(obs_t)
 
     root_latent = root_out.latent.squeeze(0)
     root_value = float(root_out.value.squeeze(0).item())
 
-    root_action_ids, root_priors = _select_topk_priors(
-        policy_logits=root_out.policy_logits.squeeze(0),
-        legal_actions=legal_actions,
-        k=int(config.max_policy_actions),
-    )
+    _ = legal_actions  # fixed action-space (sim handles busy/legality at execution time)
+    # We assume the joint action space is fixed; legality is handled by the simulator at execution time.
+    root_action_ids, root_priors = _topk_priors_full(policy_logits=root_out.policy_logits.squeeze(0), k=int(config.max_policy_actions))
 
-    if add_exploration_noise and root_action_ids.size > 0:
+    if add_exploration_noise and root_action_ids.size > 0 and float(config.dirichlet_fraction) > 0.0:
         noise = rng.dirichlet([float(config.dirichlet_alpha)] * int(root_action_ids.size)).astype(np.float32, copy=False)
         frac = float(config.dirichlet_fraction)
         root_priors = (1.0 - frac) * root_priors + frac * noise
@@ -99,51 +97,78 @@ def run_mcts(
 
     root = _Node(latent=root_latent, reward=0.0, action_ids=root_action_ids, priors=root_priors)
 
-    for _ in range(int(config.num_simulations)):
-        node = root
-        search_path: list[tuple[_Node, int]] = []
+    n_sims = int(config.num_simulations)
+    batch = max(1, int(config.mcts_batch_size))
+    batch = min(batch, n_sims)
+    k = int(config.max_policy_actions)
 
-        # Traverse
-        while True:
-            if node.action_ids.size == 0:
-                break
-            a_idx = _select_action_puct(node=node, c_puct=float(config.c_puct))
-            search_path.append((node, a_idx))
-            child = node.children[a_idx]
-            if child is None:
-                # Expand new leaf via model.
-                act = int(node.action_ids[a_idx])
-                with torch.no_grad():
-                    out = net.recurrent_inference(node.latent, torch.tensor(act, device=device))
-                child_action_ids, child_priors = _select_topk_priors(
-                    policy_logits=out.policy_logits.squeeze(0),
-                    legal_actions=legal_actions,  # fixed action-space (busy robots handled by env, not model)
-                    k=int(config.max_policy_actions),
-                )
+    for batch_start in range(0, n_sims, batch):
+        cur = min(batch, n_sims - batch_start)
+        # Collect expansions for this batch.
+        paths: list[list[tuple[_Node, int]]] = []
+        exp_nodes: list[_Node] = []
+        exp_edge_idxs: list[int] = []
+        exp_action_ids: list[int] = []
+        exp_map: dict[tuple[_Node, int], int] = {}
+
+        for _ in range(cur):
+            node = root
+            path: list[tuple[_Node, int]] = []
+            while True:
+                if node.action_ids.size == 0:
+                    break
+                a_idx = _select_action_puct(node=node, c_puct=float(config.c_puct))
+                # Virtual visit to diversify within the batch (kept as real).
+                node.visit_counts[a_idx] += 1
+                path.append((node, a_idx))
+                child = node.children[a_idx]
+                if child is None:
+                    key = (node, a_idx)
+                    if key not in exp_map:
+                        exp_map[key] = len(exp_nodes)
+                        exp_nodes.append(node)
+                        exp_edge_idxs.append(a_idx)
+                        exp_action_ids.append(int(node.action_ids[a_idx]))
+                    break
+                node = child
+            paths.append(path)
+
+        if exp_nodes:
+            latents = torch.stack([n.latent for n in exp_nodes], dim=0)
+            acts = torch.tensor(exp_action_ids, device=device, dtype=torch.long)
+            with torch.inference_mode():
+                out = net.recurrent_inference(latents, acts)
+
+            # Top-k priors for all expanded leaves in one shot.
+            topv, topi = torch.topk(out.policy_logits, k=min(k, out.policy_logits.shape[1]), dim=1)
+            priors = torch.softmax(topv, dim=1)
+
+            leaf_values = out.value.detach().cpu().numpy().astype(np.float32, copy=False)
+
+            for i, (parent, edge_idx) in enumerate(zip(exp_nodes, exp_edge_idxs, strict=True)):
+                if parent.children[edge_idx] is not None:
+                    continue
                 child = _Node(
-                    latent=out.latent.squeeze(0),
-                    reward=float(out.reward.squeeze(0).item()),
-                    action_ids=child_action_ids,
-                    priors=child_priors,
+                    latent=out.latent[i],
+                    reward=float(out.reward[i].item()),
+                    action_ids=topi[i].detach().cpu().numpy().astype(np.int32, copy=False),
+                    priors=priors[i].detach().cpu().numpy().astype(np.float32, copy=False),
                 )
-                node.children[a_idx] = child
-                leaf_value = float(out.value.squeeze(0).item())
-                break
-            node = child
+                parent.children[edge_idx] = child
 
-        # Backup
-        value = leaf_value if "leaf_value" in locals() else root_value
-        for parent, a_idx in reversed(search_path):
-            reward = 0.0
-            child = parent.children[a_idx]
-            if child is not None:
-                reward = float(child.reward)
-            value = reward + float(config.discount) * (-value)
-            parent.visit_counts[a_idx] += 1
-            parent.value_sums[a_idx] += float(value)
-
-        if "leaf_value" in locals():
-            del leaf_value
+        # Backup for each simulation in this batch.
+        for path in paths:
+            if not path:
+                continue
+            last_node, last_edge = path[-1]
+            leaf_idx = exp_map.get((last_node, last_edge))
+            value = float(leaf_values[leaf_idx]) if leaf_idx is not None else root_value
+            for parent, edge_idx in reversed(path):
+                child = parent.children[edge_idx]
+                if child is None:
+                    break
+                value = float(child.reward) + float(config.discount) * (-value)
+                parent.value_sums[edge_idx] += float(value)
 
     # Build policy target from root visits.
     counts = root.visit_counts.astype(np.float32)
@@ -170,25 +195,15 @@ def run_mcts(
         root_value=float(root_value_est),
     )
 
-
-def _select_topk_priors(*, policy_logits: torch.Tensor, legal_actions: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Return (action_ids, priors) for the top-k legal actions by logit.
-    """
-    if legal_actions.size == 0:
+def _topk_priors_full(*, policy_logits: torch.Tensor, k: int) -> tuple[np.ndarray, np.ndarray]:
+    if policy_logits.numel() <= 0:
         return np.zeros((0,), dtype=np.int32), np.zeros((0,), dtype=np.float32)
-
-    la = torch.from_numpy(legal_actions.astype(np.int64, copy=False)).to(policy_logits.device)
-    logits = policy_logits.index_select(0, la)
-    if logits.numel() > k:
-        topv, topi = torch.topk(logits, k=k)
-        chosen = la.index_select(0, topi)
-        priors = torch.softmax(topv, dim=0).cpu().numpy().astype(np.float32, copy=False)
-        action_ids = chosen.cpu().numpy().astype(np.int32, copy=False)
-        return action_ids, priors
-
-    priors = torch.softmax(logits, dim=0).cpu().numpy().astype(np.float32, copy=False)
-    action_ids = legal_actions.astype(np.int32, copy=False)
+    kk = min(int(k), int(policy_logits.shape[0]))
+    if kk <= 0:
+        return np.zeros((0,), dtype=np.int32), np.zeros((0,), dtype=np.float32)
+    topv, topi = torch.topk(policy_logits, k=kk)
+    priors = torch.softmax(topv, dim=0).detach().cpu().numpy().astype(np.float32, copy=False)
+    action_ids = topi.detach().cpu().numpy().astype(np.int32, copy=False)
     return action_ids, priors
 
 

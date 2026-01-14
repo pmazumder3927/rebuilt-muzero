@@ -26,8 +26,8 @@ def play_selfplay_game(
 
     step = 0
     while True:
-        add_noise = True
         temp = float(config.temperature) if step < int(config.temperature_drop_step) else 0.0
+        add_noise = bool(float(config.dirichlet_fraction) > 0.0 and temp > 0.0)
 
         mcts_out = run_mcts(
             net=net,
@@ -71,4 +71,3 @@ def _pad_policy(policy: PolicyTarget, *, k: int) -> tuple[np.ndarray, np.ndarray
     if s > 0:
         probs = (probs / s).astype(np.float32, copy=False)
     return ids, probs
-

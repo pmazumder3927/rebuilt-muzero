@@ -33,16 +33,31 @@ Run a small training job on Apple Silicon using Metal (MPS):
 
 `python3 scripts/train_muzero.py --device mps --iterations 50`
 
+For faster iteration during development:
+
+`python3 scripts/train_muzero.py --device mps --preset fast --iterations 50`
+
+For stronger (slower) search:
+
+`python3 scripts/train_muzero.py --device mps --preset full --iterations 50`
+
 Useful knobs:
 
 - `--num-sims 32` (MCTS simulations per move; higher = stronger but slower)
 - `--games-per-iter 5`
 - `--train-steps-per-iter 200`
 - `--min-replay-games 20` (warmup threshold; set lower for smoke tests)
+- `--eval-games 5` (optional “no-noise, greedy” evaluation)
+  - `--plot-every 1` (write `.tmp/muzero/metrics.png` more/less often)
 
 Checkpoints are written to:
 
 - `.tmp/muzero/latest.pt`
+
+Metrics are written to:
+
+- `.tmp/muzero/metrics.csv`
+- `.tmp/muzero/metrics.png` (loss + selfplay/eval score diff + win-rate/entropy)
 
 ## Where the code lives
 
@@ -54,4 +69,3 @@ Checkpoints are written to:
 - Replay buffer + targets: `rebuilt_muzero/muzero/replay.py`
 - Training step: `rebuilt_muzero/muzero/train.py`
 - Training CLI: `scripts/train_muzero.py`
-
