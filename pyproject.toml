@@ -1,13 +1,32 @@
 [project]
 name = "rebuilt-muzero"
-version = "0.0.0"
-description = "MuZero-style macro strategy coach for FRC 2026 REBUILT."
-readme = "PLAN.md"
+version = "0.1.0"
+description = "MuZero-style macro strategy coach for the FIRST Robotics 2026 REBUILT game."
+readme = "README.md"
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Pramit Mazumder", email = "pmazumder3927@gmail.com" }]
+keywords = ["muzero", "reinforcement-learning", "self-play", "frc", "robotics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-train = ["torch>=2.0", "tqdm>=4.0"]
+train = ["torch>=2.0", "tqdm>=4.0", "matplotlib>=3.8"]
+viz = ["matplotlib>=3.8"]
+gym = ["gymnasium>=0.29"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/pmazumder3927/rebuilt-muzero"
+Repository = "https://github.com/pmazumder3927/rebuilt-muzero"
+Issues = "https://github.com/pmazumder3927/rebuilt-muzero/issues"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -16,3 +35,11 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["rebuilt_muzero*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]
