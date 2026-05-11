@@ -96,9 +96,23 @@ See [docs/design.md](docs/design.md) for the full design notes.
 
 ## Status
 
-Research code. The sim is the most mature part; the MuZero stack runs
-end-to-end and trains, but no champion-level weights are bundled here. The
-real-time "drive coach" UI sketched in the design doc is not implemented.
+The simulator and MuZero stack both work end-to-end. The macro sim runs
+hundreds of full matches per second on a laptop (see
+`scripts/benchmark_macro_sim.py`). Training has been verified on CPU, MPS,
+and CUDA — losses come down, policy entropy collapses as the policy
+sharpens, and the trained agent beats random play in eval.
+
+![training curves](docs/training.png)
+
+*30 iterations of `--preset medium` on an RTX 4080 SUPER (~6 minutes, 120
+self-play games). Top to bottom: train losses, score-diff (R−B) on self-play
++ greedy eval, win-rate + policy entropy, per-iteration time breakdown.*
+
+Trained checkpoints are not bundled in the repo — re-run training locally
+to produce them; they land under `.tmp/muzero/`.
+
+The real-time drive-coach UI sketched in `docs/design.md` is not
+implemented; this repo is the simulator + agent only.
 
 ## License
 

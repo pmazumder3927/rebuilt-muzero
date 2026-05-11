@@ -9,9 +9,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
-# Editors / OS
+# Editors / OS / agent state
 .idea/
 .vscode/
+.claude/
 .DS_Store
 *.swp
 
