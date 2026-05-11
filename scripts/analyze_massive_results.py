@@ -17,7 +17,7 @@ def _percentiles(x: np.ndarray, ps: list[float]) -> list[float]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Quick stats for massive_results.json")
-    parser.add_argument("--path", type=Path, default=Path("massive_results.json"))
+    parser.add_argument("--path", type=Path, default=Path("data/massive_results.json"))
     args = parser.parse_args()
 
     data = json.loads(args.path.read_text())

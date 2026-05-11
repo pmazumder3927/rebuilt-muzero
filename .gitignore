@@ -1,6 +1,28 @@
+# Local scratch / build artifacts
 .tmp/
-__pycache__/
+build/
+dist/
+*.egg-info/
 *.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors / OS
+.idea/
+.vscode/
 .DS_Store
+*.swp
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Fetched assets (downloaded from CycletimeHeatmap on demand)
 assets/field.png
 assets/saved_layout.json
+
+# We don't redistribute the FIRST game manual; users can fetch it from FIRST directly.
+*.pdf

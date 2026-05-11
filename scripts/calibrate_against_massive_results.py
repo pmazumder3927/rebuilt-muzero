@@ -111,7 +111,7 @@ def run_match(env: RebuiltMacroSim, *, seed: int, blue_robot_id: int = 3, red_ro
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rough calibration harness against massive_results.json")
-    parser.add_argument("--path", type=Path, default=Path("massive_results.json"))
+    parser.add_argument("--path", type=Path, default=Path("data/massive_results.json"))
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--episodes-per-sample", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
