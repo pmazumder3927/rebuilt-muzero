@@ -44,7 +44,6 @@ def train_step(
     valid_steps = torch.from_numpy(batch["valid_steps"]).to(device=device, dtype=torch.float32)
     valid_rewards = torch.from_numpy(batch["valid_rewards"]).to(device=device, dtype=torch.float32)
 
-    B = obs0.shape[0]
     K = int(config.unroll_steps)
 
     net.train()

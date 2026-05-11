@@ -38,15 +38,3 @@ class JointActionSpace:
             out[i] = x % base
             x //= base
         return out
-
-    def legal_actions(self, *, per_robot_legal: list[np.ndarray]) -> np.ndarray:
-        if len(per_robot_legal) != self.n_robots:
-            raise ValueError(f"per_robot_legal must have length {self.n_robots}, got {len(per_robot_legal)}")
-        grids = np.meshgrid(*per_robot_legal, indexing="ij")
-        combos = np.stack([g.reshape(-1) for g in grids], axis=-1).astype(np.int32, copy=False)
-        encoded = np.zeros((combos.shape[0],), dtype=np.int32)
-        base = int(self.n_per_robot)
-        muls = np.array([base**i for i in range(self.n_robots)], dtype=np.int32)
-        encoded = (combos * muls[None, :]).sum(axis=1).astype(np.int32, copy=False)
-        return encoded
-

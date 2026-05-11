@@ -20,7 +20,6 @@ def play_selfplay_game(
 ) -> GameHistory:
     rng = np.random.default_rng(seed)
     obs = game.reset(seed=seed)
-    legal = np.arange(game.action_space_size, dtype=np.int32)
 
     history = GameHistory(obs=[], actions=[], rewards=[], root_values=[], policy_action_ids=[], policy_probs=[])
 
@@ -33,7 +32,6 @@ def play_selfplay_game(
             net=net,
             config=config,
             obs=obs,
-            legal_actions=legal,
             rng=rng,
             temperature=temp,
             add_exploration_noise=add_noise,

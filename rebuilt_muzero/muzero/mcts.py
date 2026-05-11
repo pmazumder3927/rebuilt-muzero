@@ -64,7 +64,6 @@ def run_mcts(
     net: MuZeroNet,
     config: MuZeroConfig,
     obs: np.ndarray,
-    legal_actions: np.ndarray,
     rng: np.random.Generator,
     temperature: float,
     add_exploration_noise: bool,
@@ -73,8 +72,9 @@ def run_mcts(
     """
     Run MuZero-style PUCT MCTS from a root observation.
 
-    Values are from the POV of the player to act at `obs`. Rewards are also from that POV.
-    The backup rule uses: v <- r + discount * (-v_next).
+    The action space is fixed; per-step legality is handled by the simulator at
+    execution time. Values and rewards are from the POV of the player to act
+    at `obs`. The backup rule is: v <- r + discount * (-v_next).
     """
     net.eval()
     obs_t = torch.from_numpy(obs).to(device=device, dtype=torch.float32)
@@ -85,8 +85,6 @@ def run_mcts(
     root_latent = root_out.latent.squeeze(0)
     root_value = float(root_out.value.squeeze(0).item())
 
-    _ = legal_actions  # fixed action-space (sim handles busy/legality at execution time)
-    # We assume the joint action space is fixed; legality is handled by the simulator at execution time.
     root_action_ids, root_priors = _topk_priors_full(policy_logits=root_out.policy_logits.squeeze(0), k=int(config.max_policy_actions))
 
     if add_exploration_noise and root_action_ids.size > 0 and float(config.dirichlet_fraction) > 0.0:

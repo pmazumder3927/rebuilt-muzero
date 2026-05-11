@@ -77,4 +77,3 @@ class RebuiltMacroGymEnv:  # pragma: no cover
 
     def render(self) -> None:
         return None
-
