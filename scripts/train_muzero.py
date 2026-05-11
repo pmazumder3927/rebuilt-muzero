@@ -25,7 +25,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--out-dir", type=Path, default=Path(".tmp/muzero"))
-    parser.add_argument("--device", choices=["auto", "cpu", "mps"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     parser.add_argument("--config", type=Path, default=None, help="Optional JSON config (MuZeroConfig fields).")
     parser.add_argument("--preset", choices=["fast", "medium", "full"], default="medium", help="Convenience presets for speed/strength.")
     parser.add_argument(

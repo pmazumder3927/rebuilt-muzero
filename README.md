@@ -34,8 +34,8 @@ python scripts/visualize_macro_sim.py --policy greedy
 # Smoke-test the training loop
 python scripts/train_muzero.py --preset fast --iterations 5 --min-replay-games 2
 
-# Real (still small) training run
-python scripts/train_muzero.py --device mps --preset medium --iterations 50
+# Real training run (auto-picks cuda > mps > cpu)
+python scripts/train_muzero.py --preset medium --iterations 50
 ```
 
 `pip install -e .` (without `[train]`) installs only the simulator — useful if
